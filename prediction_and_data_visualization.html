@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Panel de Monitoreo Ambiental - PM2.5 y Variables</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/luxon/3.4.4/luxon.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <style>
+    .chart-container {
+      @apply bg-white rounded-lg shadow-lg p-6 mb-6 border border-gray-200;
+    }
+    .loading {
+      @apply text-center text-gray-500 animate-pulse;
+    }
+    .error {
+      @apply text-red-600 bg-red-100 p-2 rounded;
+    }
+    canvas {
+      @apply w-full h-auto;
+    }
+  </style>
+</head>
+<body class="bg-green-50 text-gray-800 font-sans">
+  <header class="bg-green-700 text-white p-4">
+    <h1 class="text-3xl font-bold">Panel de Monitoreo Ambiental</h1>
+    <p class="text-sm">PM2.5 y Variables Predictoras - Actualizado al 14/07/2025 16:40</p>
+  </header>
+
+  <main class="container mx-auto p-4">
+    <div class="flex flex-col md:flex-row gap-4 mb-6">
+      <input type="date" id="startDate" class="p-2 border rounded" />
+      <input type="date" id="endDate" class="p-2 border rounded" />
+      <select id="variableFilter" class="p-2 border rounded">
+        <option value="all">Todas las Variables</option>
+        <option value="no2">NO₂</option>
+        <option value="so2">SO₂</option>
+        <option value="pm10">PM10</option>
+        <option value="pm25">PM2.5</option>
+      </select>
+      <button id="exportBtn" class="bg-blue-500 text-white p-2 rounded hover:bg-blue-600">Exportar Datos</button>
+    </div>
+
+    <div id="loading" class="loading">Cargando datos...</div>
+    <div id="error" class="hidden error"></div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="chart-container">
+        <canvas id="chart_combined"></canvas>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart_no2"></canvas>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart_so2"></canvas>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart_pm10"></canvas>
+      </div>
+      <div class="chart-container">
+        <canvas id="chart_pm25"></canvas>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyC0Ifm9YP7y6iXrCy509RQlyu1C9mYYOkA",
+      authDomain: "prediccion-pm-25.firebaseapp.com",
+      projectId: "prediccion-pm-25",
+      storageBucket: "prediccion-pm-25.appspot.com",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const predictionsRef = db.collection("pm25_predictions");
+
+    const createChart = (ctxId, title, colors, isCombined = false) => {
+      return new Chart(document.getElementById(ctxId).getContext("2d"), {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: isCombined
+            ? [
+                { label: "NO₂", borderColor: colors[0], data: [], fill: false, tension: 0.4 },
+                { label: "SO₂", borderColor: colors[1], data: [], fill: false, tension: 0.4 },
+                { label: "PM10", borderColor: colors[2], data: [], fill: false, tension: 0.4 },
+                { label: "PM2.5", borderColor: colors[3], data: [], fill: false, tension: 0.4 }
+              ]
+            : [{ label: title, borderColor: colors[0], data: [], fill: false, tension: 0.4 }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            title: { display: true, text: title, font: { size: 18 } },
+            legend: { position: 'bottom', labels: { boxWidth: 12 } }
+          },
+          scales: {
+            x: {
+              title: { display: true, text: 'Fecha y Hora' },
+              ticks: {
+                maxRotation: 45,
+                minRotation: 45,
+                font: { size: 10 },
+                callback: function(value) {
+                  return value.length > 10 ? value.substr(0, 10) + '...' : value;
+                }
+              }
+            },
+            y: {
+              title: { display: true, text: 'Concentración (µg/m³)' },
+              beginAtZero: true,
+              ticks: {
+                callback: function(value) { return Number(value).toFixed(2); }
+              }
+            }
+          }
+        }
+      });
+    };
+
+    const charts = {
+      combined: createChart("chart_combined", "Todas las Variables", ['#27ae60', '#e67e22', '#c0392b', '#16a085'], true),
+      no2: createChart("chart_no2", "NO₂", ['#27ae60']),
+      so2: createChart("chart_so2", "SO₂", ['#e67e22']),
+      pm10: createChart("chart_pm10", "PM10", ['#c0392b']),
+      pm25: createChart("chart_pm25", "PM2.5 Predicho", ['#16a085'])
+    };
+
+    let dataCache = [];
+
+    predictionsRef.onSnapshot(snapshot => {
+      dataCache = snapshot.docs.map(doc => {
+        const data = doc.data();
+        const inputDate = luxon.DateTime.fromISO(data.input_datetime, { zone: 'America/Bogota' });
+        return {
+          time: inputDate.toFormat('yyyy-MM-dd HH:mm'),
+          no2: data.predictor_values?.no2 ?? null,
+          so2: data.predictor_values?.so2 ?? null,
+          pm10: data.predictor_values?.pm10 ?? null,
+          pm25: data.pm25_prediction ?? null
+        };
+      }).filter(d => d.no2 !== null || d.so2 !== null || d.pm10 !== null || d.pm25 !== null);
+
+      updateCharts();
+      document.getElementById('loading').style.display = 'none';
+    }, err => {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('error').textContent = `Error: ${err.message}`;
+      document.getElementById('error').classList.remove('hidden');
+    });
+
+    const updateCharts = () => {
+      const startDate = document.getElementById('startDate').value;
+      const endDate = document.getElementById('endDate').value;
+      const variableFilter = document.getElementById('variableFilter').value;
+
+      let filteredData = dataCache;
+      if (startDate || endDate) {
+        filteredData = filteredData.filter(d => {
+          const date = luxon.DateTime.fromFormat(d.time, 'yyyy-MM-dd HH:mm', { zone: 'America/Bogota' });
+          const start = startDate ? luxon.DateTime.fromISO(startDate) : null;
+          const end = endDate ? luxon.DateTime.fromISO(endDate).endOf('day') : null;
+          return (!start || date >= start) && (!end || date <= end);
+        });
+      }
+
+      // Ordenar datos de forma ascendente por tiempo
+      filteredData.sort((a, b) => new Date(a.time) - new Date(b.time));
+
+      const labels = filteredData.map(d => d.time);
+
+      charts.no2.data.labels = labels;
+      charts.no2.data.datasets[0].data = filteredData.map(d => d.no2);
+      charts.so2.data.labels = labels;
+      charts.so2.data.datasets[0].data = filteredData.map(d => d.so2);
+      charts.pm10.data.labels = labels;
+      charts.pm10.data.datasets[0].data = filteredData.map(d => d.pm10);
+      charts.pm25.data.labels = labels;
+      charts.pm25.data.datasets[0].data = filteredData.map(d => d.pm25);
+
+      charts.combined.data.labels = labels;
+      charts.combined.data.datasets[0].data = filteredData.map(d => d.no2);
+      charts.combined.data.datasets[1].data = filteredData.map(d => d.so2);
+      charts.combined.data.datasets[2].data = filteredData.map(d => d.pm10);
+      charts.combined.data.datasets[3].data = filteredData.map(d => d.pm25);
+
+      Object.keys(charts).forEach(key => {
+        if (key !== 'combined' && variableFilter !== 'all' && key !== variableFilter) {
+          charts[key].canvas.parentElement.style.display = 'none';
+        } else {
+          charts[key].canvas.parentElement.style.display = 'block';
+        }
+      });
+
+      Object.values(charts).forEach(chart => chart.update());
+    };
+
+    document.getElementById('startDate').addEventListener('change', updateCharts);
+    document.getElementById('endDate').addEventListener('change', updateCharts);
+    document.getElementById('variableFilter').addEventListener('change', updateCharts);
+
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      const csv = [
+        'Fecha y Hora,NO₂,SO₂,PM10,PM2.5',
+        ...dataCache.map(d => `${d.time},${d.no2 ?? ''},${d.so2 ?? ''},${d.pm10 ?? ''},${d.pm25 ?? ''}`).join('\n')
+      ].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      saveAs(blob, `monitoreo_ambiental_${new Date().toISOString().slice(0, 10)}.csv`);
+    });
+  </script>
+</body>
+</html>
